@@ -1,0 +1,350 @@
+---
+title: "Customer Review Sentiment Analysis"
+author: "Samuel Vazquez Aguirre"
+date: "June 2025"
+output: html_document
+---
+
+# **1. Introduction**
+
+This project aims to perform a sentiment analysis on a set of customer reviews for a product, using Natural Language Processing (NLP) techniques in R. The analysis seeks to provide an overview of customer sentiment and identify key aspects driving their positive or negative opinions.
+
+Note: I made this project in Spanish. This Markdown translate the project to English.
+
+------------------------------------------------------------------------
+
+# **2. Business Questions**
+
+To guide this analysis, the following key questions were formulated from a stakeholder's perspective:
+
+-   **What is the overall sentiment of our customers towards the product/service?**
+-   **What are the specific aspects of the product that our customers appreciate most or cause them the most dissatisfaction?**
+-   **Is there a discrepancy between star ratings and the textual content of the reviews?**
+
+------------------------------------------------------------------------
+
+# **3. Setup and Data Loading**
+
+This section loads the necessary libraries and the review data, as well as the sentiment lexicon.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+# Load necessary libraries
+
+library(ggplot2) 
+library(tidyverse) 
+library(lubridate) 
+library(dplyr) 
+library(tidytext) 
+library(stopwords)
+
+# Load review data
+datos <- read_csv("reseñas_audifonos_sinteticas.csv")
+View(datos)
+
+# Load the sentiment lexicon
+lexico_sentimiento <- lexico_afinn %>%
+  select(palabra, puntuacion)
+
+# Load Spanish stop words
+stop_words_es <- data.frame(palabra = stopwords("es")) 
+View(stop_words_es)
+```
+
+# **4. Text Preprocessing and Cleaning**
+
+This phase prepares the textual data for analysis.
+
+```{r}
+
+# Initial glimpse of the data
+glimpse(datos)
+summary(datos)
+
+# Looking for NA values
+is.na(datos)
+
+# Cleaning the "texto" column
+texto_limpio <- datos %>%
+  mutate(
+    texto = texto %>%
+      # Convert to lowercase
+      str_to_lower() %>%
+      # Remove special characters
+      str_remove_all("[[:punct:]]") %>%
+      str_remove_all("\\d+") %>%
+      # Remove URLs, mentions, and hashtags
+      str_remove_all("https?://\\S+") %>%
+      str_remove_all("@\\w+") %>%
+      str_remove_all("#\\w+") %>%
+      # Remove extra spaces
+      str_squish()
+  )
+
+# Rename the column "texto" to "comentarios" to make it easier to read
+texto_limpio <- texto_limpio %>%
+  rename(comentarios = texto)
+
+# Create a new column with the total lenght of the coments
+df_limpio <- texto_limpio %>%
+  mutate(
+    longitud_del_comentario = str_count(texto_limpio$comentarios)
+  )
+
+View(df_limpio)
+
+# Tokenization and Stop Word Removal
+
+df_tokens <- df_limpio %>%
+  unnest_tokens(output = palabra, input = comentarios)
+
+stop_words_es <- data.frame(palabra = stopwords("es"))
+
+df_filtrado <- df_tokens %>%
+  anti_join(stop_words_es, by = "palabra")
+
+View(df_filtrado)
+
+# With this section we delete the noise, thanks to tokenization and deleting stop words.
+```
+
+## **4.1 Word Frequency Analysis**
+
+Here, we analyze the frequency of the most common words after preprocessing, providing an initial insight into the dominant themes in the reviews.
+
+```{r}
+
+# Count the frequency
+frecuencia <- df_filtrado %>%
+  count(palabra, sort = TRUE)
+
+print("Total number of unique words after filtering stop words:")
+print(length(unique(frecuencia$palabra)))
+print("Total word count after filtering stop words:")
+print(sum(frecuencia$n))
+```
+
+## **4.2 Frequency Plot**
+
+This plot visualizes the most frequent words in the dataset.
+
+```{r}
+
+frecuencia %>%
+  head(21) %>%
+  ggplot(aes(x = reorder(palabra, n), y = n)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "More Frequent Words After Preprocessing", x = "Words", y = "Frequency") +
+  theme_classic()
+```
+
+Insight: An initial examination of word frequencies after cleaning and stop word removal reveals that terms like "precio", "excelencia", "amo", "calidad", and "audio" are among the most frequently mentioned. This provides a preliminary understanding of the core topics discussed by users before applying sentiment analysis.
+
+# **5. Sentimient Analysis**
+
+Application of the sentiment lexicon and classification of reviews.
+
+## **5.1 Lexicon Coverage Assessment**
+
+Before proceeding with the sentiment scoring, it's essential to understand the coverage of our chosen sentiment lexicon against the unique words found in the preprocessed reviews. This metric provides insight into how much of the review vocabulary the lexicon can evaluate.
+
+```{r}
+
+# Join filtered words from the reviews with the sentiment lexicon
+df_con_sentimientos <- df_filtrado %>%
+  inner_join(lexico_sentimiento, by = "palabra", relationship = "many-to-many")
+
+# Checking the total coverage from the lexicon dataframe.
+palabras_encontradas <- df_con_sentimientos %>% 
+  distinct(palabra) %>% 
+  nrow()
+
+total_palabras_reseñas <- df_filtrado %>% 
+  distinct(palabra) %>% 
+  nrow()
+
+print(paste("Words from reviews found in the lexicon:", palabras_encontradas))
+print(paste("Total unique words in filtered reviews:", total_palabras_reseñas))
+print(paste("Percentage of lexicon coverage:", round(palabras_encontradas / total_palabras_reseñas * 100, 2), "%"))
+```
+
+Insight: The lexicon used covered approximately 22% of the unique words present in the filtered reviews. This limited coverage implies that a significant portion of the vocabulary did not have an associated sentiment score, which can affect the granularity and accuracy of the lexicon-based sentiment analysis.
+
+## **5.2 Calculating Sentiment Scores per Review**
+
+After assessing the lexicon's coverage, we proceed to calculate a total sentiment score for each review. This is done by summing the sentiment scores of all lexicon-matched words within that review.
+
+```{r}
+
+# Calculate the total sentiment score for each review
+sentimiento_por_reseña <- df_con_sentimientos %>%
+  group_by(id) %>%
+  summarise(
+    score_total = sum(puntuacion, na.rm = TRUE),
+    num_palabras_con_sentimiento = n()
+  ) %>%
+  ungroup()
+```
+
+## **5.3 Classifying Final Sentiment**
+
+Based on the score_total, each review is then classified into one of three categories: "Positive," "Negative," or "Neutral."
+
+```{r}
+
+reseña_clasificada <- sentimiento_por_reseña %>%
+  mutate(
+    sentimiento_final = case_when(
+      score_total > 0 ~ "Positive",
+      score_total < 0 ~ "Negative",
+      TRUE ~ "Neutral"              
+    )
+  )
+
+# Display a sample of the final classifications
+print(head(reseña_clasificada))
+```
+
+## **5.4 Integrating Sentiment Data with Original Reviews**
+
+Finally, we integrate the calculated sentiment scores and classifications back into our main dataframe, analisis_completo. This comprehensive dataframe will be used for all subsequent analyses and visualizations.
+
+```{r}
+
+analisis_completo <- df_limpio %>%
+  inner_join(reseña_clasificada, by = "id")
+
+# Display the structure of the final combined dataframe
+glimpse(analisis_completo)
+```
+
+# **6. Results and Insights**
+
+This section presents the key findings from the sentiment analysis, addressing the initial business questions posed by the stakeholder.
+
+## **6.1 Overall Customer Sentiment**
+
+This section addresses the first stakeholder question about the overall sentiment. We'll look at the distribution of reviews classified as Positive, Negative, or Neutral.
+
+```{r}
+
+distribucion_sentimientos <- reseña_clasificada %>%
+  count(sentimiento_final) %>%
+  mutate(porcentaje = n / sum(n) * 100)
+
+print(distribucion_sentimientos)
+
+ggplot(distribucion_sentimientos, aes(x = "", y = porcentaje, fill = sentimiento_final)) +
+  geom_bar(width = 1, stat = "identity") +
+  coord_polar("y", start = 0) +
+  labs(title = "Overall Sentiment Distribution in Reviews ",
+       fill = "Sentiment",
+       caption = "Note: Analysis based on a lexicon with ~22% unique word coverage.") +
+  theme_void() +
+  geom_text(aes(label = paste0(round(porcentaje, 1), "%")),
+            position = position_stack(vjust = 0.5), size = 4) +
+  scale_fill_manual(values = c("Negative" = "red", "Neutral" = "blue", "Positive" = "green")) +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+**Insight**: Sentiment analysis revealed that approximately 51% of reviews were classified as positive and 41% as negative, with a smaller percentage of neutral reviews. This suggests a notable polarization of opinions. Despite an overall average star rating of nearly 4 stars, a significant portion of users expressed dissatisfaction at the textual level.
+
+## **6.2 Comparison: Star Ratings vs. Textual Sentiment**
+
+Here we examine the relationship between numerical star ratings and the sentiment inferred from the review text. This helps address whether explicit ratings align with the detailed feedback.
+
+```{r}
+
+promedio <- df_con_sentimientos$calificación %>%
+  mean()
+
+print(paste("Mean Sentiment Score:", promedio))
+
+
+# Calculate Pearson correlation coefficient
+corr_pearson <- cor(df_con_sentimientos$calificación, 
+                    df_con_sentimientos$puntuacion, 
+                    use = "pairwise.complete.obs")
+
+print(paste("Pearson Correlation Coefficient between Stars and Sentiment Score:",
+            round(corr_pearson, 2)))
+
+# Scatter Plot
+ggplot(df_con_sentimientos, aes(x = calificación, y = puntuacion)) +
+  geom_point(col = "red") +
+  geom_smooth(method = "lm", col = "red4") +
+  labs(title = "Relationship between Star Ratings and Sentiment Score",
+       x = "Star Rating", y = "Total Sentiment Score",
+       caption = "Note: Sentiment analysis based on a lexicon with ~22% unique word coverage.") +
+  theme_minimal()
+```
+
+**Insight**: Both visual and numerical analysis (Pearson Correlation Coefficient = 0.04) reveal an insignificant linear correlation between the star ratings provided by users and the inferred "puntuacion" from the text. This disconnect is primarily attributable to the limited coverage of the sentiment lexicon used (approximately 22% of unique words in the reviews). By failing to evaluate a significant proportion of the vocabulary, the lexicon-based analysis misses crucial nuances, preventing textual sentiment from consistently reflecting explicit user ratings. This finding underscores the importance of lexicon quality and comprehensiveness in this type of analysis.
+
+## **6.3 Dominant Keywords by Sentiment**
+
+This section identifies the most frequent terms associated with each sentiment polarity, addressing the question about specific aspects causing satisfaction or dissatisfaction.
+
+```{r}
+
+# Most frequent words in Positive reviews
+palabras_positivas <- analisis_completo %>%
+  filter(sentimiento_final == "Positive") %>%
+  unnest_tokens(palabra, comentarios) %>%
+  anti_join(stop_words_es, by = "palabra") %>%
+  inner_join(lexico_sentimiento, by = "palabra") %>%
+  count(palabra, sort = TRUE) %>%
+  head(15)
+
+# Most frequent words in Negative reviews
+palabras_negativas <- analisis_completo %>%
+  filter(sentimiento_final == "Negative") %>%
+  unnest_tokens(palabra, comentarios) %>%
+  anti_join(stop_words_es, by = "palabra") %>%
+  inner_join(lexico_sentimiento, by = "palabra") %>%
+  count(palabra, sort = TRUE) %>%
+  head(15)
+
+# Keywords Graphs
+ggplot(palabras_positivas, aes(x = reorder(palabra, n), y = n)) +
+  geom_col(col = "green4") +
+  coord_flip() +
+  labs(title = "Top Keywords in Positive Reviews",
+       x = "Keywords",
+       y = "Frequency",
+       caption = "Note: Based on words found in the sentiment lexicon.") +
+  theme_minimal()
+
+ggplot(palabras_negativas, aes(x = reorder(palabra, n), y = n)) +
+  geom_col(col = "red4") +
+  coord_flip() +
+  labs(title = "Top Keywords in Negative Reviews",
+       x = "Keywords",
+       y = "Frequency",
+       caption = "Note: Based on words found in the sentiment lexicon.") +
+  theme_minimal()
+```
+
+**Insight**: The identified keywords provide a glimpse into the terms that, within the lexicon's coverage, drove the sentiment classifications. For instance, positive reviews often feature terms like "increíble", "buenos", "satisfecho", while negative ones frequently mention "problemas", "horrible", "espera".
+
+**Important Observation (and example of limitation)**: It has been identified that the word "pésima" (terrible) appears in the top terms associated with 'Positive' classified reviews. This apparent inconsistency is a clear example of the limitations of purely lexicon-based sentiment analysis, especially with a limited lexicon coverage (\~22%) and without advanced mechanisms to interpret negation, irony, or the overall context of a sentence. A review with an overall positive sentiment (due to the predominance of other positive words in the lexicon) could still contain isolated negative terms. This finding underscores the need for more sophisticated tools or domain-specific lexicons for a more accurate interpretation of natural language.
+
+# **7. Final Conclusions and Project Learnings**
+
+This customer review sentiment analysis project provided a valuable opportunity to apply Natural Language Processing (NLP) and data analysis techniques in R. Although a predefined sentiment lexicon and synthetic data were used, the process clearly illustrated the crucial stages of a typical textual analysis workflow.
+
+**Key Conclusions**: Overall Sentiment Overview: The analysis revealed that, based on words captured by the lexicon, approximately 51% of reviews were classified as positive and 41% as negative. This suggests a polarization of opinions, where despite an overall average star rating of nearly 4 stars, a significant portion of users expressed dissatisfaction at the textual level.
+
+**Identification of Impactful Aspects (with Limitations)**: The most frequent keywords in positive reviews (such as "increíble", "buenos", "satisfecho") and negative reviews (such as "problemas", "horrible", "espera") offer a preliminary indication of product attributes that generated a strong emotional response. However, this finding is heavily conditioned by the lexicon used.
+
+**Discrepancy Between Explicit Rating and Textual Sentiment**: A notable finding was the near-zero linear correlation (Pearson Coefficient = 0.04) between the star ratings assigned by users and the inferred "puntuacion" from the text. This indicates that direct numerical ratings and expressed sentiment in the text do not always align, suggesting that star ratings may not capture the full complexity of the customer experience.
+
+**Project Learnings**: Importance of Preprocessing: Text cleaning, tokenization, and stop word removal are fundamental steps that directly impact the quality and relevance of any textual analysis results.
+
+**Limitations of Generic Lexicons**: The main methodological learning was the critical dependence on the sentiment lexicon. Low lexicon coverage (approximately 22% of unique words), as observed in this project, significantly limits the ability of a lexicon-based analysis to capture the richness and nuances of natural language. Phenomena like the appearance of "pésima" (terrible) in positive contexts demonstrate the need to understand context, not just individual words.
+
+**Value of Critical Interpretation**: It's crucial not only to execute code and obtain results but also to critically interpret them, identify anomalies, and understand the limitations of the tools and data. This allows for formulating more precise insights and more informed recommendations.
+
+**Future Directions**: For real-world projects with high accuracy requirements, the necessity of employing more robust and domain-specific sentiment lexicons becomes evident, or transitioning to advanced deep learning-based machine learning models (such as Transformer-based models pre-trained for Spanish), which can capture context, negation, and linguistic subtleties more effectively.
